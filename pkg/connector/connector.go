@@ -2,9 +2,14 @@ package connector
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/0xzer/snapper"
@@ -19,14 +24,6 @@ import (
 	"maunium.net/go/mautrix/event"
 	"go.mau.fi/util/ptr"
 	"go.mau.fi/util/configupgrade"
-)
-
-// Information to find out exactly which commit the bridge was built from.
-// These are filled at build time with the -X linker flag.
-var (
-	Tag       = "unknown"
-	Commit    = "unknown"
-	BuildTime = "unknown"
 )
 
 func main() {
@@ -66,13 +63,11 @@ func (sc *SnapchatConnector) Start(ctx context.Context) error {
 }
 
 func (sc *SnapchatConnector) ReceiveMessage(w http.ResponseWriter, r *http.Request) {
-	// Validate the signature of the incoming request
 	if !sc.validateSignature(r) {
 		http.Error(w, "Invalid signature", http.StatusForbidden)
 		return
 	}
 
-	// Parse the incoming request body
 	var snapMessage ParsedSnapchatMessage
 	err := json.NewDecoder(r.Body).Decode(&snapMessage)
 	if err != nil {
@@ -81,7 +76,6 @@ func (sc *SnapchatConnector) ReceiveMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Fetch additional message data using snapper client
 	messageData, err := sc.client.Messaging.QueryMessages(snapMessage.ConversationID, 1, 0)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to query messages")
@@ -89,13 +83,12 @@ func (sc *SnapchatConnector) ReceiveMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Process the message data and send it to the Matrix server
 	matrixMessage := bridgev2.MatrixMessage{
 		Portal: bridgev2.Portal{
 			ID: makePortalID(snapMessage.ConversationID),
 		},
 		Content: bridgev2.MessageContent{
-			Body: snapMessage.Body,
+			Body: messageData.Messages[0].Body,
 		},
 	}
 
@@ -103,16 +96,33 @@ func (sc *SnapchatConnector) ReceiveMessage(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to send message to Matrix")
 		http.Error(w, "Failed to send message to Matrix", http.StatusInternalServerError)
+		return
 	}
 
-	// Send a blank response to Snapchat
 	w.WriteHeader(http.StatusOK)
 }
 
-// validateSignature validates the incoming request signature
 func (sc *SnapchatConnector) validateSignature(r *http.Request) bool {
-	// I need to implement signature validation logic
-	return true 
+	signatureHeader := r.Header.Get("X-Snap-Signature")
+	if signatureHeader == "" {
+		return false
+	}
+
+	bodyBytes, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		return false
+	}
+	defer r.Body.Close()
+	r.Body = ioutil.NopCloser(strings.NewReader(string(bodyBytes)))
+
+	expectedSignature := computeHMACSHA256(bodyBytes, "your-secret-key")
+	return hmac.Equal([]byte(signatureHeader), []byte(expectedSignature))
+}
+
+func computeHMACSHA256(message []byte, secret string) string {
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write(message)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (sc *SnapchatConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
@@ -154,21 +164,18 @@ type UserLoginMetadata struct {
 func (sc *SnapchatConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserLogin) error {
 	meta := login.Metadata.(*UserLoginMetadata)
 
-	// Initialize snapper client from cookies
 	session, err := snapper.NewSessionFromCookies(meta.Cookies)
 	if err != nil {
 		return fmt.Errorf("failed to create Snapchat session from cookies: %w", err)
 	}
 
-	// Initialize Fidelius keys
 	fideliusKeys, err := crypto.LoadPublicKeyFromBase64(meta.FideliusKey)
 	if err != nil {
 		return fmt.Errorf("failed to load Fidelius keys from base64: %w", err)
 	}
 
-	// Create snapper client
 	client := snapper.NewClient(session, debug.NewLogger(), nil)
-	client.Session.FideliusKeys = fideliusKeys // Assign Fidelius keys to the session
+	client.Session.FideliusKeys = fideliusKeys
 
 	login.Client = &SnapchatClient{
 		UserLogin: login,
@@ -186,7 +193,6 @@ var _ bridgev2.NetworkAPI = (*SnapchatClient)(nil)
 var _ bridgev2.IdentifierResolvingNetworkAPI = (*SnapchatClient)(nil)
 
 func (sc *SnapchatClient) Connect(ctx context.Context) error {
-	// nil
 	return nil
 }
 
@@ -342,7 +348,7 @@ func (sc *SnapchatClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2
 	return &bridgev2.MatrixMessageResponse{
 		DB: &bridgev2.Message{
 			ID:       networkid.MessageID(snapMessage.MessageID),
-			SenderID: makeUserID(*msg.Content.Sender.Sender), // Using sender from Matrix message
+			SenderID: makeUserID(*msg.Content.Sender.Sender),
 		},
 	}, nil
 }
