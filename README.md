@@ -5,9 +5,9 @@ A Matrix-Snapchat bridge using the Snapper library.
 
 ## Features
 
-[ ] Send and receive messages
-[ ] Manage conversations and users
-[ ] Comprehensive error handling and logging
+- [ ] Send and receive messages
+- [ ] Manage conversations and users
+- [ ] Comprehensive error handling and logging
 
 ## Setup
 
